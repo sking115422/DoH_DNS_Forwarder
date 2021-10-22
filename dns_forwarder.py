@@ -76,8 +76,6 @@ def start_forwarding_DoH (client_data):
 
     content_length = len(client_data)
 
-    hn = socket.gethostbyaddr(DEF_DOH_SERVER)
-
     http_header = 'POST /dns-query HTTP/1.1\r\nHost: ' + DEF_DOH_SERVER +'\r\nContent-Type: application/dns-message\r\nContent-Length: ' + str(content_length) + '\r\n\r\n'
 
     bin_convert = bytes(http_header, 'utf-8')
@@ -88,9 +86,15 @@ def start_forwarding_DoH (client_data):
     
     sec_sock = create_ssl_socket(DEF_DOH_SERVER, DoH_PORT)
     sec_sock.send(http_req)
+
     server_data = sec_sock.recv(4096)
     print (server_data)
-    return server_data
+
+    rtn_char = '\r\n\r\n'.encode('utf-8')
+    parts = server_data.split(rtn_char)
+    DNS_response = parts[1]
+    
+    return DNS_response
 
     
 def main():
@@ -118,3 +122,8 @@ if __name__ == "__main__":
 
 # https://cloudflare-dns.com/dns-query
 # application/DNS-udpwireformat
+
+#\x5c\x72\x5c\x6e\x5c\x72\x5c\x6e
+# 5c725c6e5c725c6e
+
+# 0101110001110010010111000110111001011100011100100101110001101110
