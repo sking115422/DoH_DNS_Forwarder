@@ -5,6 +5,20 @@ import ssl
 from datetime import datetime
 
 
+"""
+
+Basic DNS_Forwarder
+
+Written By: Spencer King
+
+This code is designed to implement a basic DNS forwarder to run on a linux server. It takes optional command line arguments from the user to specify whether to preform the DNS 
+forwarding over UDP or over DoH. The program also takes in an optional list of hostnames to be blocked as a file. It will then block any domain on the list and return a NXDOMAIN
+error to the client. It also logs each query in an append only log file specified by the user. 
+
+"""
+
+
+#Argparse is used here to reading command line arguments
 parser = argparse.ArgumentParser(description='Run to start up a dns forwarder with DoH capabilities')
 
 parser.add_argument('-d', action='store', dest='DST_IP', type=str, required=False, default='127.0.0.53', help='Destination DNS server IP')
@@ -15,6 +29,7 @@ parser.add_argument('--doh_server', action='store', dest='DOH_SERVER', type=str,
 
 args = parser.parse_args()
 
+#Error handling in case user miss enters command line flags or arguments
 if (args.DOH == True and args.DOH_SERVER != None and args.DST_IP != '127.0.0.53'):
     print ("Those flags are invalid...")
     print ("Please chose one flag. The --doh flag or the --doh_server flag or the -d flag.")
@@ -26,8 +41,8 @@ if (args.DOH == True and args.DOH_SERVER != None):
     exit(0) 
 
 
-
-# GLOBAL VARIABLES
+### GLOBAL VARIABLES
+#GENERAL
 FORWARDER_IP = '127.0.0.1'
 DENY_LIST_FILENAME = args.DENY_LIST_FILE
 LOG_FILENAME = args.LOG_FILE
@@ -40,13 +55,14 @@ SENDING_PORT = 12345
 #DOH
 DoH_PORT = 443
 
+#Allowing user to set desired DoH server or selecting 8.8.8.8 (Google DoH Server) as default
 if (args.DOH == True):
     DEF_DOH_SERVER = '8.8.8.8'
 
 if (args.DOH_SERVER != None): 
     DEF_DOH_SERVER = args.DOH_SERVER
 
-
+#Creating UDP socket
 def create_udp_sock (IP, PORT):
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind((IP, PORT))
@@ -55,6 +71,7 @@ def create_udp_sock (IP, PORT):
     
     return sock
 
+#Forwarding client request and receiving server response over UDP 
 def start_forwarding_udp (client_data):
 
     F_to_S_sock = create_udp_sock(FORWARDER_IP, SENDING_PORT)
@@ -66,7 +83,7 @@ def start_forwarding_udp (client_data):
 
     return server_data
 
-
+#Creating secure socket with TLS session
 def create_ssl_socket (IP, PORT):
     hostname = IP
     context = ssl.create_default_context()
@@ -78,7 +95,7 @@ def create_ssl_socket (IP, PORT):
             
     return ssock
 
-# /dns-query
+#Forwarding client request and receiving server response over DoH 
 def start_forwarding_DoH (client_data):
 
     content_length = len(client_data)
@@ -98,6 +115,7 @@ def start_forwarding_DoH (client_data):
     
     return DNS_response
 
+#Checking client query against blocked hostnames and return mock NXDOMAIN server response error if denied
 def check_blocked_IPs (client_data):
 
     packet = scapy.DNS(client_data)
@@ -138,6 +156,7 @@ def check_blocked_IPs (client_data):
 
         return resp, hostname, query_type, status
 
+#Logging each query as allowed or denied and timestamping it
 def log_query (hostname, query_type, status):
     
     now = datetime.now()
@@ -150,32 +169,41 @@ def log_query (hostname, query_type, status):
 
     print ("Query successfully logged in " + LOG_FILENAME)
 
-
+### DRIVER FUNCTION
 def main():
     
+    #Creating socket to listen for client DNS quieries on port 53
     print()
     C_to_F_sock = create_udp_sock(FORWARDER_IP, DNS_PORT)
     print("Now listening for DNS requests...")
     print()
 
+    #Starting forwarder
     while True:
 
+        #Recieving client query data and address
         client_data, client_address = C_to_F_sock.recvfrom(512)
 
+        #Checking if client query is allowed
         resp, hostname, query_type, status = check_blocked_IPs(client_data)
 
+        #Logging query and status as allowed or denied
         log_query(hostname, query_type, status)
 
+        #If query is not allowed, an error response is sent back to the client
         if (resp != None):
             C_to_F_sock.sendto(resp, client_address)
             print("DNS request was either not found or blocked\n")
             continue
-
+        
+        #If query is allowed and client has chosen UDP, forwarder will send and recieve over UDP
         if (args.DOH == False and args.DOH_SERVER == None):
             server_data = start_forwarding_udp (client_data)
+        #If query is allowed and client has chosen DoH, forwarder will send and recieve over DoH
         else:
             server_data = start_forwarding_DoH (client_data)
-
+        
+        #Sending final response from local server back to client
         C_to_F_sock.sendto(server_data, client_address)
         print ("Local server response successfully sent back to client\n")
 
@@ -183,10 +211,6 @@ def main():
 if __name__ == "__main__":
     main()
 
-
-
-# https://cloudflare-dns.com/dns-query
-# application/DNS-udpwireformat
 
 # DoH Server List:
 # Google - 8.8.8.8
