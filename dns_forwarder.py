@@ -1,9 +1,8 @@
 import socket
-# import dnspython as dns
-# import dns.resover
 import scapy.all as scapy
 import argparse
 import ssl
+from datetime import datetime
 
 
 parser = argparse.ArgumentParser(description='Run to start up a dns forwarder with DoH capabilities')
@@ -24,20 +23,36 @@ if (args.DOH == True and args.DOH_SERVER != None and args.DST_IP != '127.0.0.53'
 if (args.DOH == True and args.DOH_SERVER != None):
     print ("Those flags are invalid...")
     print ("Please chose either the --doh flag or the --doh_server flag")
-    exit(0)    
+    exit(0) 
 
-# Global variables
+
+
+# GLOBAL VARIABLES
 FORWARDER_IP = '127.0.0.1'
+DENY_LIST_FILENAME = args.DENY_LIST_FILE
+LOG_FILENAME = args.LOG_FILE
+
+#UDP
 LOCAL_DNS_IP = args.DST_IP
 DNS_PORT = 53
 SENDING_PORT = 12345
+
+#DOH
 DoH_PORT = 443
-DEF_DOH_SERVER = '8.8.8.8'
+
+if (args.DOH == True):
+    DEF_DOH_SERVER = '8.8.8.8'
+
+if (args.DOH_SERVER != None): 
+    DEF_DOH_SERVER = args.DOH_SERVER
+
 
 def create_udp_sock (IP, PORT):
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind((IP, PORT))
-    print("Socket created on {0}:{1} ...".format(IP, PORT))
+
+    print("Socket created on {0}:{1}".format(IP, PORT))
+    
     return sock
 
 def start_forwarding_udp (client_data):
@@ -45,10 +60,9 @@ def start_forwarding_udp (client_data):
     F_to_S_sock = create_udp_sock(FORWARDER_IP, SENDING_PORT)
 
     F_to_S_sock.sendto(client_data, (LOCAL_DNS_IP, DNS_PORT))
-
+    print("Forwarding request via UDP to local DNS server " + LOCAL_DNS_IP + " on port " + str(DNS_PORT))
     server_data, server_address = F_to_S_sock.recvfrom(512)
-    print ('client data: ', str(server_data))
-    print ('client address: ', str(server_address))\
+    print("Successfully recieved response back from server")
 
     return server_data
 
@@ -56,39 +70,27 @@ def start_forwarding_udp (client_data):
 def create_ssl_socket (IP, PORT):
     hostname = IP
     context = ssl.create_default_context()
-    # context.check_hostname = False
-    # context.verify_mode = ssl.CERT_NONE
-    # context.minimum_version = ssl.PROTOCOL_SSLv23
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.connect((hostname, PORT))
     ssock = context.wrap_socket(sock, server_hostname=hostname)
-    print(ssock.version())
-    # with socket.create_connection((hostname, PORT)) as sock:
-    #     with context.wrap_socket(sock, server_hostname=hostname) as ssock:
+    print("TLS session: " + ssock.version() + " started with DoH server " + DEF_DOH_SERVER + " on port " + str(DoH_PORT))
             
-
     return ssock
 
-
-
+# /dns-query
 def start_forwarding_DoH (client_data):
 
     content_length = len(client_data)
-
     http_header = 'POST /dns-query HTTP/1.1\r\nHost: ' + DEF_DOH_SERVER +'\r\nContent-Type: application/dns-message\r\nContent-Length: ' + str(content_length) + '\r\n\r\n'
-
     bin_convert = bytes(http_header, 'utf-8')
-    
     http_req = bin_convert + client_data
-
-    print(http_req)
     
     sec_sock = create_ssl_socket(DEF_DOH_SERVER, DoH_PORT)
     sec_sock.send(http_req)
-
+    print ("DoH request successfully forwarded to local DoH server")
     server_data = sec_sock.recv(4096)
-    print (server_data)
+    print ("DoH response successfully recieved from local DoH server")
 
     rtn_char = '\r\n\r\n'.encode('utf-8')
     parts = server_data.split(rtn_char)
@@ -96,23 +98,86 @@ def start_forwarding_DoH (client_data):
     
     return DNS_response
 
-    
-def main():
+def check_blocked_IPs (client_data):
 
+    packet = scapy.DNS(client_data)
+
+    raw_hostname = packet.sprintf("qd = %qd%")
+
+    parts = raw_hostname.split()
+    temp = parts[3]
+    hostname = temp[7:-2]
+
+    temp2 = parts[4]
+    query_type = temp2[6:]
+
+    file = open(DENY_LIST_FILENAME, "r")
+    text = file.read()
+    lines = text.split('\n')
+    file.close()
+
+    status = "ALLOW"
+    block = False
+
+    for each in lines:
+        each.strip()
+        if hostname == each:
+            block = True
+
+    if (block == False):
+        return None, hostname, query_type, status
+    else:
+        packet_id = int(packet.sprintf("%id%"))
+
+        dns_req = scapy.DNS(id = packet_id, qr = 1, opcode = 0000, rd = 1, ra = 1, rcode = 3, qd = scapy.DNSQR(qname=hostname, qtype = query_type))
+
+        resp = bytes(dns_req)
+        # print("DNS request was either not found or blocked")
+
+        status = "DENY"
+
+        return resp, hostname, query_type, status
+
+def log_query (hostname, query_type, status):
+    
+    now = datetime.now()
+    dt_string = now.strftime("%d/%m/%Y|%H:%M:%S")
+
+    file = open(LOG_FILENAME, "a")
+    entry = dt_string + " " + hostname + " " + query_type  + " " + status + " \n"
+    file.write(entry)
+    file.close()
+
+    print ("Query successfully logged in " + LOG_FILENAME)
+
+
+def main():
+    
+    print()
     C_to_F_sock = create_udp_sock(FORWARDER_IP, DNS_PORT)
+    print("Now listening for DNS requests...")
+    print()
 
     while True:
 
         client_data, client_address = C_to_F_sock.recvfrom(512)
-        print ('client data: ', str(client_data))
-        print ('client address: ', str(client_address))
+
+        resp, hostname, query_type, status = check_blocked_IPs(client_data)
+
+        log_query(hostname, query_type, status)
+
+        if (resp != None):
+            C_to_F_sock.sendto(resp, client_address)
+            print("DNS request was either not found or blocked\n")
+            continue
 
         if (args.DOH == False and args.DOH_SERVER == None):
-            server_data = start_forwarding_udp
+            server_data = start_forwarding_udp (client_data)
         else:
-            server_data = start_forwarding_DoH(client_data)
+            server_data = start_forwarding_DoH (client_data)
 
         C_to_F_sock.sendto(server_data, client_address)
+        print ("Local server response successfully sent back to client\n")
 
 
 if __name__ == "__main__":
@@ -123,7 +188,6 @@ if __name__ == "__main__":
 # https://cloudflare-dns.com/dns-query
 # application/DNS-udpwireformat
 
-#\x5c\x72\x5c\x6e\x5c\x72\x5c\x6e
-# 5c725c6e5c725c6e
-
-# 0101110001110010010111000110111001011100011100100101110001101110
+# DoH Server List:
+# Google - 8.8.8.8
+# Cloudflare - 1.0.0.1 
